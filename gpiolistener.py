@@ -114,91 +114,103 @@ def conv_s16(num):
     return (num + 2**15) % 2**16 - 2**15
 
 class BMP280():
+    "Control BMP280 temperature & pressure sensor via I2C."
     ADDR = 0x76
     def __init__(self, i2c):
         self.i2c = i2c
+        self.reset()
         self.dig_param = self.i2c.read_i2c_block_data(BMP280.ADDR, 0x88, 26) # Compensation params
         self.raw_pressure    = 0
         self.raw_temperature = 0
         self.t_fine = 0
         #print(self.dig_param)
+        self.dig_T1 = self.dig_param[0] | self.dig_param[1] << 8 # unsigned short
+        self.dig_T2 = conv_s16(self.dig_param[2] | self.dig_param[3] << 8) # signed short
+        self.dig_T3 = conv_s16(self.dig_param[4] | self.dig_param[5] << 8) # signed short
+        self.dig_P1 = self.dig_param[6] | (self.dig_param[7] << 8) # unsigned short
+        self.dig_P2 = conv_s16(self.dig_param[8]  | (self.dig_param[9]  << 8))  # signed short
+        self.dig_P3 = conv_s16(self.dig_param[10] | (self.dig_param[11] << 8)) # signed short
+        self.dig_P4 = conv_s16(self.dig_param[12] | (self.dig_param[13] << 8)) # signed short
+        self.dig_P5 = conv_s16(self.dig_param[14] | (self.dig_param[15] << 8)) # signed short
+        self.dig_P6 = conv_s16(self.dig_param[16] | (self.dig_param[17] << 8)) # signed short
+        self.dig_P7 = conv_s16(self.dig_param[18] | (self.dig_param[19] << 8)) # signed short
+        self.dig_P8 = conv_s16(self.dig_param[20] | (self.dig_param[21] << 8)) # signed short
+        self.dig_P9 = conv_s16(self.dig_param[22] | (self.dig_param[23] << 8)) # signed short
+
+    def get_ID(self):
+        self.ID = self.i2c.read_byte_data(BMP280.ADDR, 0xD0)
+        print("[BMP280] ID:", hex(self.ID))
+
+    def reset(self):
+        self.i2c.write_byte_data(BMP280.ADDR, 0xE0, 0xB6)
+        print("[BMP280] Resetting...")
+        time.sleep(0.01)
+
+    def measure_start(self):
+        "Normal mode"
+        self.i2c.write_byte_data(BMP280.ADDR, 0xF5, 0b01001000) #config t_standby(125ms):010|filter_coef(4):010|spi_en:00
+        self.i2c.write_byte_data(BMP280.ADDR, 0xF4, 0b00101111) #ctrl_meas tempr(x1):001|press(x4):011|mode:11
+        print("[BMP280] Starting mesurement...")
+        #print(bin(self.i2c.read_byte_data(BMP280.ADDR, 0xF5)))
+        time.sleep(0.1)
 
     def measure_once(self):
         "Forced mode"
-        self.i2c.write_byte_data(BMP280.ADDR, 0xF4, 0x25) # ctrl_meas 00100101
+        self.i2c.write_byte_data(BMP280.ADDR, 0xF4, 0b00100101) # ctrl_meas  tempr:001|press:001|mode:01
+        print("[BMP280] Measuring once...")
         time.sleep(0.1)
+
+    def get_temperature_and_pressure(self):
         data = self.i2c.read_i2c_block_data(BMP280.ADDR, 0xF7, 7) 
         self.raw_pressure    = (data[2] >> 4) | (data[1] << 4) | (data[0] << 12) # Pressure data
         self.raw_temperature = (data[5] >> 4) | (data[4] << 4) | (data[3] << 12) # Temperature data
         #print(data)
-
-    def get_temperature(self):
-        T = self.compensate_temperature(self.raw_temperature, self.dig_param)
+        T = self.compensate_temperature()
         print(T / 100.0, "degC")
-        return T / 100.0
-
-    def get_pressure(self):
-        P = self.compensate_pressure(self.raw_pressure, self.dig_param, self.t_fine)
+        P = self.compensate_pressure()
         print(P / 25600.0, "hPa")
-        return P / 25600.0
+        return T / 100.0, P / 25600.0
 
-    def compensate_temperature(self, raw_data, dig):
+    def compensate_temperature(self):
         """
         Returns temperature in DegC, resolution is 0.01 DegC. Output value of “5123” equals 51.23 DegC. 
         t_fine carries fine temperature as global value
         """
-        dig_T1 = dig[0] | dig[1] << 8 # unsigned short
-        dig_T2 = conv_s16(dig[2] | dig[3] << 8) # signed short
-        dig_T3 = conv_s16(dig[4] | dig[5] << 8) # signed short
         # compensation calculation
-        var1 = (((raw_data >> 3) - (dig_T1 << 1)) * dig_T2) >> 11
-        var2 = (((((raw_data >> 4) - dig_T1) * ((raw_data >> 4) - dig_T1)) >> 12) * dig_T3) >> 14
+        adc_T = self.raw_temperature
+        var1 = (((adc_T >> 3) - (self.dig_T1 << 1)) * self.dig_T2) >> 11
+        var2 = (((((adc_T >> 4) - self.dig_T1) * ((adc_T >> 4) - self.dig_T1)) >> 12) * self.dig_T3) >> 14
         self.t_fine = var1 + var2
         T = (self.t_fine * 5 + 128) >> 8
-        #print(raw_data)
-        #print(dig_T1)
-        #print(dig_T2)
-        #print(dig_T3)
-        #print(var1)
-        #print(var2)
-        #print(self.t_fine)
-        #print(T)
         return T
 
-    def compensate_pressure(self, raw_data, dig, t_fine):
+    def compensate_pressure(self):
         """
         Returns pressure in Pa as unsigned 32 bit integer in Q24.8 format (24 integer bits and 8 fractional bits). 
         Output value of “24674867” represents 24674867/256 = 96386.2 Pa = 963.862 hPa
         """
-        dig_P1 = dig[6] | (dig[7] << 8) # unsigned short
-        dig_P2 = conv_s16(dig[8]  | (dig[9]  << 8))  # signed short
-        dig_P3 = conv_s16(dig[10] | (dig[11] << 8)) # signed short
-        dig_P4 = conv_s16(dig[12] | (dig[13] << 8)) # signed short
-        dig_P5 = conv_s16(dig[14] | (dig[15] << 8)) # signed short
-        dig_P6 = conv_s16(dig[16] | (dig[17] << 8)) # signed short
-        dig_P7 = conv_s16(dig[18] | (dig[19] << 8)) # signed short
-        dig_P8 = conv_s16(dig[20] | (dig[21] << 8)) # signed short
-        dig_P9 = conv_s16(dig[22] | (dig[23] << 8)) # signed short
         # compensation calculation
-        var1 = t_fine - 128000
-        var2 = var1 * var1 * dig_P6
-        var2 = var2 + ((var1 * dig_P5) << 17)
-        var2 = var2 + (dig_P4 << 35)
-        var1 = ((var1 * var1 * dig_P3) >> 8) + ((var1 * dig_P2) << 12) 
-        var1 = (((1 << 47) + var1) * (dig_P1)) >> 33
+        var1 = self.t_fine - 128000
+        var2 = var1 * var1 * self.dig_P6
+        var2 = var2 + ((var1 * self.dig_P5) << 17)
+        var2 = var2 + (self.dig_P4 << 35)
+        var1 = ((var1 * var1 * self.dig_P3) >> 8) + ((var1 * self.dig_P2) << 12) 
+        var1 = (((1 << 47) + var1) * (self.dig_P1)) >> 33
         if var1 == 0:
             return 0 # avoid exception caused by division by zero
-        p = 1048576 - raw_data
+        p = 1048576 - self.raw_pressure
         p = (((p << 31) - var2) * 3125) // var1
-        var1 = (dig_P9 * (p >> 13) * (p >> 13)) >> 25 
-        var2 = (dig_P8 * p) >> 19
-        p = ((p + var1 + var2) >> 8) + (dig_P7 << 4) 
+        var1 = (self.dig_P9 * (p >> 13) * (p >> 13)) >> 25 
+        var2 = (self.dig_P8 * p) >> 19
+        p = ((p + var1 + var2) >> 8) + (self.dig_P7 << 4) 
         return p
 
 i2c, bmp280 = I2C_init()
-bmp280.measure_once()
-bmp280.get_temperature()
-bmp280.get_pressure()
+#bmp280.measure_once()
+bmp280.measure_start()
+while 1:
+    bmp280.get_temperature_and_pressure()
+    time.sleep(1)
 exit(0)
 
 if __name__=="__main__":
