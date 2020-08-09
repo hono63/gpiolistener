@@ -205,25 +205,25 @@ class BMP280():
         p = ((p + var1 + var2) >> 8) + (self.dig_P7 << 4) 
         return p
 
-i2c, bmp280 = I2C_init()
-#bmp280.measure_once()
-bmp280.measure_start()
-while 1:
-    bmp280.get_temperature_and_pressure()
-    time.sleep(1)
-exit(0)
 
 if __name__=="__main__":
     #wp.wiringPiSetup() # For sequential pin numbering
     #wp.wiringPiSetupGpio() # For GPIO pin numbering
     #wp.pinMode(17, 0)
+    ### SPI Display ###
     switch           = digitalio.DigitalInOut(board.D17) # Physical 11th.
     switch.direction = digitalio.Direction.INPUT
     oled = OLED_init()
     OLED_clear_display(oled)
+    ### I2C Sensors ###
+    i2c, bmp280 = I2C_init()
+    #bmp280.measure_once()
+    bmp280.measure_start()
+    ## variables ##
     wolflag   = False
     counter1  = 0
     counter2  = 0
+    counter3  = 0
     ipaddress = ""
     cpustat   = ""
     network_i = 0
@@ -248,6 +248,9 @@ if __name__=="__main__":
             cpustat = "CPU:" + str(psutil.cpu_percent())
             cpustat += "% Mem:" + str(psutil.virtual_memory().percent) + "%"
             counter2 = 0
+        if counter3 % 4 == 0: # update per 1.3 sec
+            bmp280.get_temperature_and_pressure()
+            counter3 = 0
         if switch.value:
             if wolflag is False: # Detect Rising Edge
                 subprocess.run(["wakeonlan " + MAC_ADDRESS], shell=True)
@@ -264,4 +267,5 @@ if __name__=="__main__":
             wolflag = False
         counter1 += 1
         counter2 += 1
+        counter3 += 1
         time.sleep(0.33333)
