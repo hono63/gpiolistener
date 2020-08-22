@@ -279,9 +279,9 @@ if __name__=="__main__":
             now = datetime.datetime.now()
             OLED_show_text(oled, 
                     #"Hello Pi!\n" 
-                    + cpustat + "\n"
+                    cpustat + "\n"
                     + ipaddress + "\n"
-                    "{:.1f}Cdeg {:.1f}hPa\n".format(tmpr, pres)
+                    + "{:.1f}Cdeg {:.1f}hPa\n".format(tmpr, pres)
                     + str(now.strftime("%Y/%m/%d %H:%M:%S"))
                     )
             wolflag = False
