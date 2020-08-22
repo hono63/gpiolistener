@@ -1,0 +1,9 @@
+[Unit]
+Description=Polling GPIO-17 and Display several information
+
+[Service]
+ExecStart=/home/pi/berryconda3/bin/python /opt/gpiolistener.py
+
+[Install]
+WantedBy=multi-user.target
+
