@@ -107,7 +107,8 @@ def get_cpu_stat(proc):
 def I2C_init():
     i2c = smbus.SMBus(1)
     bmp280 = BMP280(i2c)
-    return i2c, bmp280
+    si7021 = Si7021(i2c)
+    return i2c, bmp280, si7021
 
 def conv_s16(num):
     "convert positive integer to singed short"
@@ -166,9 +167,9 @@ class BMP280():
         self.raw_temperature = (data[5] >> 4) | (data[4] << 4) | (data[3] << 12) # Temperature data
         #print(data)
         T = self.compensate_temperature()
-        print(T / 100.0, "degC")
+        #print(T / 100.0, "degC")
         P = self.compensate_pressure()
-        print(P / 25600.0, "hPa")
+        #print(P / 25600.0, "hPa")
         return T / 100.0, P / 25600.0
 
     def compensate_temperature(self):
@@ -205,6 +206,22 @@ class BMP280():
         p = ((p + var1 + var2) >> 8) + (self.dig_P7 << 4) 
         return p
 
+class Si7021():
+    "Control Si7021 temperature & humidity sensor via I2C."
+    ADDR = 0x40
+    def __init__(self, i2c):
+        self.i2c = i2c
+        self.reset()
+
+    def reset(self):
+        self.i2c.read_byte_data(Si7021.ADDR, 0xFE)
+        print("[Si7021] Resetting...")
+        time.sleep(0.01)
+
+    def get_temperature(self):
+        data = self.i2c.read_i2c_block_data(Si7021.ADDR, 0xE3, 2)
+        print(data)
+        time.sleep(0.01)
 
 if __name__=="__main__":
     #wp.wiringPiSetup() # For sequential pin numbering
@@ -216,7 +233,9 @@ if __name__=="__main__":
     oled = OLED_init()
     OLED_clear_display(oled)
     ### I2C Sensors ###
-    i2c, bmp280 = I2C_init()
+    i2c, bmp280, si7021 = I2C_init()
+    #si7021.get_temperature() # remote I/O error
+    #exit(0)
     #bmp280.measure_once()
     bmp280.measure_start()
     ## variables ##
@@ -249,7 +268,7 @@ if __name__=="__main__":
             cpustat += "% Mem:" + str(psutil.virtual_memory().percent) + "%"
             counter2 = 0
         if counter3 % 4 == 0: # update per 1.3 sec
-            bmp280.get_temperature_and_pressure()
+            tmpr, pres = bmp280.get_temperature_and_pressure()
             counter3 = 0
         if switch.value:
             if wolflag is False: # Detect Rising Edge
@@ -259,7 +278,8 @@ if __name__=="__main__":
         else:
             now = datetime.datetime.now()
             OLED_show_text(oled, 
-                    "Hello Pi!\n" 
+                    #"Hello Pi!\n" 
+                    "{:.1f}Cdeg {:.1f}hPa\n".format(tmpr, pres)
                     + cpustat + "\n"
                     + ipaddress + "\n"
                     + str(now.strftime("%Y/%m/%d %H:%M:%S"))
