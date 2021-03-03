@@ -76,7 +76,7 @@ def OLED_show_text(oled, text="Hello World!"):
     oled.image(image)
     oled.show()
 
-NETWORK=["eth0", "wlan0", "br0", "tap_tap8"]
+NETWORK=["eth0", "wlan0", "tailscale0", "br0", "tap_tap8"]
 def get_addr_str(proc, network="eth0"):
     "Get inet address in ifconfig"
     ipaddress       = ""
@@ -108,11 +108,128 @@ def I2C_init():
     i2c = smbus.SMBus(1)
     bmp280 = BMP280(i2c)
     si7021 = Si7021(i2c)
-    return i2c, bmp280, si7021
+    ccs811 = None #CCS811(i2c)
+    return i2c, bmp280, si7021, ccs811
 
 def conv_s16(num):
     "convert positive integer to singed short"
     return (num + 2**15) % 2**16 - 2**15
+
+class CCS811():
+    "Control CCS811 the CO2 sensor via I2C."
+    ADDR = 0x5A # when the ADDR is low.
+    def __init__(self, i2c):
+        self.i2c = i2c
+        status = self.check_status()
+        if status & 0b00000001:
+            self.reset()
+            self.get_ID()
+            self.get_version()
+            status = self.check_status()
+        self.app_start(status)
+        self.meas_mode = 0x00
+        self.results = []
+
+    def get_ID(self):
+        self.ID = self.i2c.read_byte_data(CCS811.ADDR, 0x20)
+        print("[CCS811] ID:", hex(self.ID))
+
+    def get_version(self):
+        self.hw_ver      = self.i2c.read_byte_data(CCS811.ADDR, 0x21)
+        temp             = self.i2c.read_i2c_block_data(CCS811.ADDR, 0x23, 2)
+        self.fw_boot_ver = str(temp[0] & 0xf0) + "." + str(temp[0] & 0x0f) + "." + str(temp[1])
+        temp             = self.i2c.read_i2c_block_data(CCS811.ADDR, 0x24, 2)
+        self.fw_app_ver  = str(temp[0] & 0xf0) + "." + str(temp[0] & 0x0f) + "." + str(temp[1])
+        print("[CCS811] H/W ver:", hex(self.hw_ver), " FW Boot ver:", self.fw_boot_ver, " FW App ver:", self.fw_app_ver)
+
+    def reset(self):
+        self.i2c.write_i2c_block_data(CCS811.ADDR, 0xFF, [0x11, 0xE5, 0x72, 0x8A])
+        print("[CCS811] Resetting...")
+        time.sleep(0.1)
+        self.check_error()
+        time.sleep(0.01)
+
+    def check_error(self, error=0x00):
+        if error == 0:
+            error = self.i2c.read_byte_data(CCS811.ADDR, 0xE0)
+        #print("error:", bin(error))
+        if error & 0b00000001:
+            print("[CCS811] Error: WRITE_REG_INVALID")
+        if error & 0b00000010:
+            print("[CCS811] Error: READ_REG_INVALID")
+        if error & 0b00000100:
+            print("[CCS811] Error: MEASMODE_INVALID")
+        if error & 0b00001000:
+            print("[CCS811] Error: MAX_RESISTANCE")
+        if error & 0b00010000:
+            print("[CCS811] Error: HEATER_FAULT")
+        if error & 0b00100000:
+            print("[CCS811] Error: HEATER_SUPPLY")
+
+    def check_status(self, status=0x00):
+        if status == 0:
+            status = self.i2c.read_byte_data(CCS811.ADDR, 0x00)
+        print("status:", bin(status))
+        if status & 0b00000001:
+            print("[CCS811] Status: ERROR")
+        if status & 0b00001000:
+            print("[CCS811] Status: DATA_READY")
+        if not (status & 0b00010000):
+            print("[CCS811] Status: not APP_VALID")
+        if not (status & 0b10000000):
+            print("[CCS811] Status: FW_MODE in boot mode")
+        return status
+
+    def app_start(self, status):
+        "If firmware is in boot mode and there is a valid application present, application will start."
+        #status = self.check_status()
+        if not (status & 0b10000000): # firmware is in boot mode
+            # APP_VERIFY
+            if not (status & 0b00010000): # app is not valid
+                print("[CCS811] Verifying application...")
+                self.i2c.write_byte(CCS811.ADDR, 0xF3)
+                time.sleep(0.1) # must wait 70ms
+                while(True):
+                    status = self.i2c.read_byte_data(CCS811.ADDR, 0x00)
+                    #print("status:", bin(status))
+                    if status & 0x20:
+                        #self.check_status()
+                        #self.check_error()
+                        break
+                    time.sleep(0.1)
+            # APP_START
+            print("[CCS811] Starting application...")
+            self.i2c.write_byte(CCS811.ADDR, 0xF4)
+            #self.i2c.write_i2c_block_data(CCS811.ADDR, 0xF4, [])
+        time.sleep(2.0)
+        status = self.check_status()
+        if status & 0b00000001:
+            self.check_error()
+            exit(0)
+
+    def measure_start(self):
+        "Mode1: Constant power mode, IAQ measurement every second."
+        print("[CCS811] Starting mesurement Mode 1...")
+        self.meas_mode = self.i2c.read_byte_data(CCS811.ADDR, 0x01)
+        print("MEAS_MODE:", bin(self.meas_mode))
+        self.meas_mode |= 0b00010000
+        print("MEAS_MODE:", bin(self.meas_mode))
+        time.sleep(0.01)
+        self.i2c.write_byte_data(CCS811.ADDR, 0x01, self.meas_mode)
+        time.sleep(0.01)
+        self.check_status()
+        self.check_error()
+        time.sleep(0.01)
+
+    def get_gas_data(self):
+        "Get measurement results. eCO2 and TVOC (Total Volatile Organic Compound)."
+        print("[CCS811] Getting gas data...")
+        self.results = self.i2c.read_i2c_block_data(CCS811.ADDR, 0x02, 8)
+        self.check_status(status=self.results[4])
+        self.eCO2 = self.results[0] << 8 | self.results[1] # 400ppm ~ 8192ppm
+        self.TVOC = self.results[2] << 8 | self.results[3] # 0ppb ~ 1187ppb
+        self.check_error(error=self.results[5])
+        return self.eCO2, self.TVOC
 
 class BMP280():
     "Control BMP280 temperature & pressure sensor via I2C."
@@ -233,11 +350,12 @@ if __name__=="__main__":
     oled = OLED_init()
     OLED_clear_display(oled)
     ### I2C Sensors ###
-    i2c, bmp280, si7021 = I2C_init()
+    i2c, bmp280, si7021, ccs811 = I2C_init()
     #si7021.get_temperature() # remote I/O error
     #exit(0)
     #bmp280.measure_once()
     bmp280.measure_start()
+    #ccs811.measure_start()
     ## variables ##
     wolflag   = False
     counter1  = 0
@@ -245,11 +363,12 @@ if __name__=="__main__":
     counter3  = 0
     ipaddress = ""
     cpustat   = ""
+    sensordt  = ""
     network_i = 0
     while True:
         #st17 = wp.digitalRead(17)
         #print("GPIO 17 ON/OFF: ", switch.value)
-        if counter1 % 6 == 0: # update per 2 sec.
+        if counter1 % 4 == 0: # update per 1.3 sec.
             addrs_namedtuple = psutil.net_if_addrs()
             for j in range(len(NETWORK)):
                 network_i = (network_i + 1) % len(NETWORK)
@@ -268,8 +387,13 @@ if __name__=="__main__":
             cpustat += "% Mem:" + str(psutil.virtual_memory().percent) + "%"
             counter2 = 0
         if counter3 % 4 == 0: # update per 1.3 sec
-            tmpr, pres = bmp280.get_temperature_and_pressure()
-            counter3 = 0
+            if counter3 == 4:
+                tmpr, pres = bmp280.get_temperature_and_pressure()
+                sensordt = "{:.1f}Cdeg {:.1f}hPa".format(tmpr, pres)
+            #else:
+                #co2, tvoc  = ccs811.get_gas_data()
+                #sensordt = str(co2) + "ppm " + str(tvoc) + "ppb"
+                #counter3 = 0
         if switch.value:
             if wolflag is False: # Detect Rising Edge
                 subprocess.run(["wakeonlan " + MAC_ADDRESS], shell=True)
@@ -281,7 +405,7 @@ if __name__=="__main__":
                     #"Hello Pi!\n" 
                     cpustat + "\n"
                     + ipaddress + "\n"
-                    + "{:.1f}Cdeg {:.1f}hPa\n".format(tmpr, pres)
+                    + sensordt + "\n"
                     + str(now.strftime("%Y/%m/%d %H:%M:%S"))
                     )
             wolflag = False
